@@ -1,74 +1,63 @@
+//NOTE only currently works with esp32 by Espressif systems versio 3.0.7 do not update!!
+
 #include <TMCStepper.h>
 
-//https://github.com/clarketronics/PN532/archive/refs/heads/master.zip pn532 library
-//==========================================================================
-//                   Things for Chimpo to play with
-//==========================================================================
-
-#define STEPPER_CURRENT      700 // mA, do not exceed 900
-#define STEP_TIME            400 // microseconds per half step (lower is faster)
-#define HIGH_STEPPER_CURRENT 900 // mA when trying to overcome jam, do not exceed 1000
+#define STEPPER_CURRENT      900 // mA, do not exceed 900
+#define STEP_TIME            500 // microseconds per half step (lower is faster)
+#define HIGH_STEPPER_CURRENT 1000 // mA when trying to overcome jam, do not exceed 1000
 #define SLOW_STEP_TIME       800 // microseconds per half step when trying to overcome jam
 
-#define NUMBER_4BYTE_UIDS 6
-#define NUMBER_7BYTE_UIDS 3
+#define BZ_PIN        10 // buzzer 
+#define EN_PIN           2 // Enable pin 
+#define DIR_PIN          3 // Direction 
+#define STEP_PIN         9 // Step 
 
-uint8_t uids4B[NUMBER_4BYTE_UIDS][4]  = {  
-  {0x00, 0x00, 0x00, 0x00}, // MAM
-  {0x00, 0x00, 0x00, 0x00}, // ME
-  {0x00, 0x00, 0x00, 0x00}, // CALLUM
-  {0x00, 0x00, 0x00, 0x00}, // HAYLEY
-  {0x00, 0x00, 0x00, 0x00}, // ELSIE
-  {0x00, 0x00, 0x00, 0x00}, // MIKE
-};
-
-uint8_t uids7B[NUMBER_4BYTE_UIDS][7] = {
-  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // MY HAND
-  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // JEN RING
-  {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // MY HAND V2
-};
-
-//==========================================================================
-//                     Pin and object configuration
-//==========================================================================
-
-#define EN_PIN           16 // Enable pin (D0) - GPIO16)
-#define DIR_PIN          4 // Direction (D2 - GPIO 4)
-#define STEP_PIN         5 // Step (D1 - GPIO 5)
-#define TOFF              5
 #define MICROSTEPS        8 // Options are 0,2,4,8,16,32,64,128,256 
-#define SPREADCYCLE    true // Options are true or false
 #define R_SENSE       0.11f
-#define DRIVER_ADDRESS 0b00 // TMC2209 Driver address according to MS1 and MS2
-#define SERIAL_PORT Serial // Hardware Serial Port
-TMC2209Stepper driver(&SERIAL_PORT, R_SENSE, DRIVER_ADDRESS); // Hardware Serial (TX / RX pins)
+#define SERIAL_PORT Serial1 // Hardware Serial Port
+TMC2208Stepper driver(&SERIAL_PORT, R_SENSE);  //  // Hardware Serial (TX / RX pins)
 
 #define MAX_STEPS_NORMAL 1920 
 #define MAX_STEPS_SLOW   1630
 
-#define AP_VAL 559
-#define LOCKED_VAL  376
-#define UNLOCKED_VAL 286
-#define LOCKED_SWITCH 9 //(sd2)
-#define UNLOCKED_SWITCH 0// (sd3)
+#define AP_BUTTON 8
+#define LOCKED_SWITCH 0
+#define UNLOCKED_SWITCH 1
 bool checkLocked; // Limit switch value for locked position
 bool checkUnlocked; // Limit switch value for unlocked position
 
 #include <SPI.h>
-#include <PN532_SPI.h>
-#include "PN532.h"
+#include <Wire.h>
+#include <Adafruit_PN532.h>
+#include <MFRC522v2.h>
+#include <MFRC522DriverSPI.h>
+#include <MFRC522DriverPinSimple.h>
+#include <MFRC522Constants.h>
 
-PN532_SPI pn532spi(SPI, 2);//(D4 SS - GPIO2)
-PN532 nfc(pn532spi);
+#define PN532_SCK (4)
+#define PN532_MOSI (6)
+#define PN532_SS (7)
+#define PN532_MISO (5)
+#define RC522_SS 7     // Chip select for RC522
+
+Adafruit_PN532 nfc(PN532_SCK, PN532_MISO, PN532_MOSI, PN532_SS);
+MFRC522DriverPinSimple ss_pin(RC522_SS); // Create pin driver. See typical pin layout above.
+SPIClass &spiClass = SPI; // Alternative SPI e.g. SPI2 or from library e.g. softwarespi.
+const SPISettings spiSettings = SPISettings(SPI_CLOCK_DIV4, MSBFIRST, SPI_MODE0); // May have to be set if hardware is not fully compatible to Arduino specifications.
+MFRC522DriverSPI rc522driver{ss_pin, spiClass, spiSettings}; // Create SPI driver.
+MFRC522 mfrc522{rc522driver};
+
+bool PN532_READER;
+bool RC522_READER;
 
 #define MAXIMUM_INVALID_ATTEMPTS 13
-uint8_t invalidAttempts = 0;
-const uint8_t invalidDelays[MAXIMUM_INVALID_ATTEMPTS] = {1, 1, 1, 1, 1, 2, 3, 5, 8, 13, 21, 33, 54};
+uint8_t invalidAttempts = 1;
+const uint8_t invalidDelays[MAXIMUM_INVALID_ATTEMPTS] = { 1, 2, 3, 5, 8, 13, 21, 33, 54};
 
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESPAsyncTCP.h>
-#include <ESPAsyncWebSrv.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <StreamUtils.h>
 #include <ArduinoJson.h>
 #include <FS.h>
@@ -77,6 +66,7 @@ const uint8_t invalidDelays[MAXIMUM_INVALID_ATTEMPTS] = {1, 1, 1, 1, 1, 2, 3, 5,
 AsyncWebServer server(80);
 
 const char index_html[] PROGMEM = "<!DOCTYPE html><html><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>h1{text-align:center;margin:auto;color:#2bca23;text-shadow:0 0 5px #26ac1f,0 0 20px #26ac1f,0 0 30px #26ac1f}.line{cursor:default;position:relative;font-size:50px}.line:after{content:'';position:absolute;width:100%;height:5px;bottom:-10px;left:-4px;transform:scaleX(0);box-shadow:0 -5px 0 #26ac1f6d;background:#20711969;transform-origin:bottom right;transition:transform .5s ease-out}.line:hover:after{transform:scaleX(1);transform-origin:bottom left}body{background-image:linear-gradient(to right,#2c2b2b,#1a1b1b,#403f3f,#403f3f,#393939,#252525)}h2{color:#26ac1f;text-shadow:0 0 20px #26ac1f;text-align:center}#uidtable{text-align:center;margin:auto}th{color:#26ac1f;text-shadow:0 0 5px #26ac1f}td{color:#26ac1f;text-shadow:0 0 5px #26ac1f}.button{color:red;text-shadow:0 0 10px red}.button:hover{text-shadow:0 0 10px red,0 0 20px red,0 0 35px red,0 0 30px red}#uidaddname,#uidadduid{padding-bottom:12px}label{align-items:center;margin:auto;display:block;margin-bottom:2px}input[type=text]{align-items:center;margin:auto;display:block;background-color:#343434;color:#45ca3e;border-color:#000}input[type=text]:focus{outline:0}input[type=submit]{color:#40cb65;background-color:#3b3a3a}input[type=submit]:hover{color:#000;background-color:#30b127}form{color:#34a351;text-shadow:0 0 5px #26ac1f,0 0 20px #26ac1f;text-align:center;margin:auto}</style><script>document.addEventListener(\"readystatechange\",(function(e){\"interactive\"==e.target.readyState&&fetch(\"uids.json\").then((e=>{if(!e.ok)throw new Error(\"HTTP error \"+e.status);return e.json()})).then((e=>{let t=document.getElementById(\"uidtable\");for(let n=0,r=e.length;n<r;n++){let r=e[n],o=t.insertRow(-1);o.insertCell(-1).appendChild(document.createTextNode(r.name)),o.insertCell(-1).appendChild(document.createTextNode(r.uid)),o.insertCell(-1).innerHTML='<a href=\"remove?uid='+n+'\" class=\"button\">&#x2715;</a>'}document.getElementById(\"loading\").style.display=\"none\"})).catch((function(){console.log(\"Error fetching UIDs JSON\")}))}))</script><body><main><h1 class=\"line\">chimpolock</h1><div id=\"uidlist\"><h2>Stored UIDs:</h2><table id=\"uidtable\"><tr><th>Name</th><th>UID</th><th>Remove</th></tr></table><h3 id=\"loading\">Loading UIDs, please wait...</h3></div><div id=\"uidadd\"><h2>Add UID:</h2><form action=\"/add\" method=\"get\"><div id=\"uidaddname\"><label for=\"name\">Name:</label> <input type=\"text\" name=\"name\" id=\"name\" required></div><div id=\"uidadduid\"><label for=\"uid\">UID:</label> <input type=\"text\" name=\"uid\" id=\"uid\" required></div><input type=\"submit\" value=\"Add\"></form></div></main></body></html>";
+
 void handleRoot(AsyncWebServerRequest *request) {
   request->send_P(200, "text/html", index_html);
 }
@@ -100,13 +90,13 @@ void handleJSON(AsyncWebServerRequest *request) {
 
 void handleRemove(AsyncWebServerRequest *request) {
   if(request->hasParam("uid")){
-    AsyncWebParameter* p = request->getParam("uid");
+    const AsyncWebParameter* p = request->getParam("uid");
     uint8_t index = p->value().toInt();
 
     File file = LittleFS.open("/uids.json", "r");
     ReadBufferingStream bufferedFileR(file, 64);
 
-    DynamicJsonDocument doc(ESP.getMaxFreeBlockSize() - 1024);
+   DynamicJsonDocument doc(ESP.getMaxAllocHeap());
     deserializeJson(doc, bufferedFileR);
     doc.shrinkToFit();
     
@@ -126,8 +116,8 @@ void handleRemove(AsyncWebServerRequest *request) {
 
 void handleAdd(AsyncWebServerRequest *request) {  
   if(request->hasParam("uid") && request->hasParam("name")){
-    AsyncWebParameter* puid = request->getParam("uid");
-    AsyncWebParameter* pname = request->getParam("name");
+    const AsyncWebParameter* puid = request->getParam("uid");
+    const AsyncWebParameter* pname = request->getParam("name");
 
     Serial.print("ADD UID - ");
     Serial.print("Name: ");
@@ -138,7 +128,7 @@ void handleAdd(AsyncWebServerRequest *request) {
     File file = LittleFS.open("/uids.json", "r");
     ReadBufferingStream bufferedFileR(file, 64);
 
-    DynamicJsonDocument doc(ESP.getMaxFreeBlockSize() - 1024);
+    DynamicJsonDocument doc(ESP.getMaxAllocHeap());
     deserializeJson(doc, bufferedFileR);
     file.close();
 
@@ -159,33 +149,21 @@ void handleAdd(AsyncWebServerRequest *request) {
 }
 
 void readSwitches() {
-  checkLocked = true;
-  checkUnlocked = true;
-  int ADC_value = 0;
-  for (int i=0; i < 10; i++){
-     ADC_value += analogRead(A0);
-  }
-  ADC_value=  ADC_value/10;
-
-  if ((ADC_value>LOCKED_VAL-20)&&(ADC_value<LOCKED_VAL+20)) {
-    checkLocked = false;
-  } else if ((ADC_value>UNLOCKED_VAL-20)&&(ADC_value<UNLOCKED_VAL+20)) {
-    checkUnlocked = false;
-  }
-	
+  checkLocked = digitalRead(LOCKED_SWITCH);
+  checkUnlocked = digitalRead(UNLOCKED_SWITCH);
 }
 
 void beep(int number, long time) {
   for (int i = 0; i < number; i++) {
-    tone(15, 440);//buzzer pin gpio
+    tone(BZ_PIN, 440);
     delay(time);
-    noTone(15);
+    noTone(BZ_PIN);
     delay(time);
   }
 }
 
 void moveLock(bool dir) {
-  driver.toff(TOFF);
+  driver.toff(5);
   digitalWrite(DIR_PIN, dir);
 
   readSwitches();
@@ -227,12 +205,14 @@ void moveLock(bool dir) {
 }
 
 void changeState() {
-  
+  //if button here for changing motor direction and toggle switch setup
+
   readSwitches();
   if (!checkUnlocked) { // checks if door is open or locked.
     beep(1, 200);
     // Clockwise
     moveLock(false);
+
     Serial.println("Door unlocked");
   } else {  
     beep(2, 200);
@@ -240,81 +220,89 @@ void changeState() {
     moveLock(true);
     Serial.println("Door locked");
   }
+}
 
-//  if (!checkLocked) { // checks if door is open or locked.
-//    beep(1, 200);
-//    // Clockwise
-//    moveLock(true);
-//    Serial.println("Door unlocked");
-//  } else {  
-//    beep(2, 200);
-//    // Anti-clockwise      
-//    moveLock(false);
-//    Serial.println("Door locked");
-//  }
+bool detectRC522() {
+  mfrc522.PCD_Init();
+  delay(100);
+  MFRC522Constants::PCD_Version version = mfrc522.PCD_GetVersion();
+  if(version == MFRC522Constants::Version_Unknown) {
+    return false;
+  } else {
+    return true;
+  }
+}
+
+bool detectPN532() {
+  nfc.begin();
+  delay(100);
+  uint32_t version = nfc.getFirmwareVersion();
+  
+  if (version) {
+    Serial.print(F("Found chip PN5")); Serial.println((version>>24) & 0xFF, HEX); 
+    Serial.print(F("Firmware ver. ")); Serial.print((version>>16) & 0xFF, DEC); 
+    Serial.print('.'); Serial.println((version>>8) & 0xFF, DEC);
+  }
+  return (version);  // Return true if detected
 }
 
 void setup() {
+  PN532_READER = false;
+  RC522_READER = false;
   Serial.begin(115200);
-  SERIAL_PORT.begin(115200);
   delay(500);
   Serial.print(F("Start of program"));
+  
+  SERIAL_PORT.begin(115200, SERIAL_8N1, 21, 20);
   pinMode(EN_PIN, OUTPUT);
   pinMode(STEP_PIN, OUTPUT);
   pinMode(DIR_PIN, OUTPUT);
   digitalWrite(EN_PIN, HIGH);
   digitalWrite(STEP_PIN, LOW);
   digitalWrite(DIR_PIN, LOW);
+  
   driver.begin();
+  driver.pdn_disable(true);
   driver.rms_current(STEPPER_CURRENT);
   driver.microsteps(MICROSTEPS);
-  driver.en_spreadCycle(SPREADCYCLE);
+  driver.en_spreadCycle(true);
   driver.pwm_autoscale(true);
+  driver.I_scale_analog(false);
+  driver.irun(16);
   driver.toff(0);
 
-//  pinMode(LOCKED_SWITCH, INPUT_PULLUP);
-//  pinMode(UNLOCKED_SWITCH, INPUT_PULLUP);
+  pinMode(AP_BUTTON, INPUT_PULLUP);
+  pinMode(LOCKED_SWITCH, INPUT_PULLUP);
+  pinMode(UNLOCKED_SWITCH, INPUT_PULLUP);
 
   readSwitches();
 
-  //SPI.begin(); // Initiate  SPI bus
-
-  nfc.begin();
-
-  delay(1000);
-  Serial.println(F("Starting up!"));
-  uint32_t versiondata = nfc.getFirmwareVersion();
-  if (! versiondata) {
-    Serial.print(F("Didn't find PN53x board"));
-    while (1); // halt
+  SPI.begin(); // Initiate  SPI bus
+  if (detectRC522()) {
+    RC522_READER = true;
+    beep(2, 200);  // Two beeps for PN532
+    Serial.println("rc522 detected.");
+    
+  } else if  (detectPN532()) { 
+    PN532_READER = true;
+    beep(3, 100);  // Three beeps for RC522
+    Serial.println("PN532 detected.");
+  } else {
+    beep(1, 500);  // Long beep if no reader is found
+    Serial.println("No RFID reader detected.");
+    while (true);  // Halt execution if no reader is found
   }
   
-  Serial.print(F("Found chip PN5")); Serial.println((versiondata>>24) & 0xFF, HEX); 
-  Serial.print(F("Firmware ver. ")); Serial.print((versiondata>>16) & 0xFF, DEC); 
-  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
-  
-  // Set the max number of retry attempts to read from a card
-  // This prevents us from waiting forever for a card, which is
-  // the default behaviour of the PN532.
-  //nfc.setPassiveActivationRetries(0x0F);
-  
-  // configure board to read RFID tags
-	
-
   if (!LittleFS.begin()) {
     Serial.println("LittleFS mount failed");
     LittleFS.format();
     LittleFS.begin();
   }
   checkJSON();
-	
-	int ADC_value = 0;
-  for (int i=0; i < 10; i++){
-     ADC_value += analogRead(A0);
-  }
-  ADC_value =  ADC_value/10;
-	
-	if ((ADC_value>AP_VAL-20)&&(ADC_value<AP_VAL+20)) {
+  
+  
+  if (!digitalRead(AP_BUTTON)) {
+    Serial.println("Softap Active, Please log into lock via smartphone.");
     WiFi.softAP("ChimpoLock", "Password123");
 		server.on("/", HTTP_GET, handleRoot);
 		server.on("/add", HTTP_GET, handleAdd);
@@ -327,9 +315,11 @@ void setup() {
 		
     server.begin();
     beep(1, 1000);
+    } else { 
+    beep(1, 200);
+    Serial.println("Softap not Active,Lock mode Enabled");
   }
 	
-  nfc.SAMConfig();
   Serial.println(F("Waiting for an ISO14443A card"));
 }
 
@@ -338,12 +328,24 @@ void loop() {
   boolean success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 , 0};  // Buffer to store the returned UID
   uint8_t uidLength;
-
-  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
   bool validUID = false;
 
-  // Awaiting an UID to be Presented
+
+  if (PN532_READER) {
+    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, &uid[0], &uidLength);
+  } else if (RC522_READER) {
+    if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+      success = true;
+      uidLength = mfrc522.uid.size;
+      for (int i = 0; i < uidLength; i++) {
+        uid[i] = mfrc522.uid.uidByte[i];
+      }
+      mfrc522.PICC_HaltA();
+    }
+  }
+
   if (!success) {
+    delay(500);
     return;
 	} else {
 		char uidStr[80];
@@ -365,7 +367,7 @@ void loop() {
 		File file = LittleFS.open("/uids.json", "r");
 		ReadBufferingStream bufferedFileR(file, 64);
 
-		DynamicJsonDocument doc(ESP.getMaxFreeBlockSize() - 1024);
+		DynamicJsonDocument doc(ESP.getMaxAllocHeap());
 		deserializeJson(doc, bufferedFileR);
 		doc.shrinkToFit();
 		
@@ -386,10 +388,12 @@ void loop() {
   if (validUID) {
     Serial.println("Valid UID");
     changeState();
+    delay(1000); // added delay to stop double scan
     invalidAttempts = 0;
   } else {
     Serial.println(" Access denied");
-   beep(3, 150);
+    
+    beep(3, 150);
     delay(invalidDelays[invalidAttempts] * 1000);
     if (invalidAttempts < MAXIMUM_INVALID_ATTEMPTS-1) {
       invalidAttempts++;
