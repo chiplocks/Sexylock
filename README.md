@@ -1,5 +1,8 @@
 **DIY Smart Lock System with RFID and Web Interface**
 
+![image](https://github.com/user-attachments/assets/25e1d00e-31c1-474d-ab16-11b47918e62e)
+
+
 a smart lock system designed to lock and unlock using RFID readers, a web interface, and a stepper motor. The system is built using an ESP32 microcontroller, TMC2208 stepper driver, and RFID modules (PN532 or RC522), a soft access point for user management. It also includes a built-in delay mechanism for unauthorized attempts and a buzzer for feedback.
 
 ## Components Used
